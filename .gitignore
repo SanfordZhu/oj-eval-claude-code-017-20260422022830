@@ -1,0 +1,17 @@
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+code
+*.d
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.log
+build/
+__pycache__/
+*.pyc
