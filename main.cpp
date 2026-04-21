@@ -215,6 +215,7 @@ struct Train {
 
     // Check if train runs on a specific date (date when leaving from station s)
     bool runsOnDate(int stationIdx, int month, int day) const {
+        (void)stationIdx; // Mark as used to avoid warning
         // The train runs daily between sale dates
         // We need to check if there exists a day d such that:
         // departureTimes[stationIdx] on day d equals (month, day, start time)
@@ -672,6 +673,7 @@ int query_train(const char* trainID, const char* dateStr) {
 
 int query_ticket(const char* fromStation, const char* toStation,
                  const char* dateStr, const char* sortBy) {
+    (void)sortBy; // Mark as used to avoid warning
     int queryMonth, queryDay;
     parseDate(dateStr, queryMonth, queryDay);
 
