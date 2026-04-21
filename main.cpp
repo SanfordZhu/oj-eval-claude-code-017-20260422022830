@@ -3,25 +3,37 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 using namespace std;
 
-// Simple hash table implementation for strings
+// Include command parser
+#include "command.h"
+
+// ==================== Constants ====================
+const int MAX_USERS = 10000;
+const int MAX_TRAINS = 1000;
+const int MAX_STATIONS_PER_TRAIN = 100;
+const int MAX_ORDERS = 100000;
 const int HASH_SIZE = 100007;
+const int DAYS_IN_MONTH[13] = {0, 30, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}; // June-August: 30,31,31
 
-struct HashNode {
-    char key[25];
-    int value;
-    HashNode* next;
+// ==================== Data Structures ====================
 
-    HashNode(const char* k, int v) : value(v), next(nullptr) {
-        strcpy(key, k);
-    }
-};
-
+// Simple hash table for string keys
+template<typename T>
 class HashMap {
 private:
-    HashNode* table[HASH_SIZE];
+    struct Node {
+        char key[25];
+        T value;
+        Node* next;
+        Node(const char* k, const T& v) : value(v), next(nullptr) {
+            strcpy(key, k);
+        }
+    };
+
+    Node* table[HASH_SIZE];
 
     unsigned int hash(const char* str) {
         unsigned int h = 0;
@@ -38,25 +50,25 @@ public:
 
     ~HashMap() {
         for (int i = 0; i < HASH_SIZE; i++) {
-            HashNode* node = table[i];
+            Node* node = table[i];
             while (node) {
-                HashNode* next = node->next;
+                Node* next = node->next;
                 delete node;
                 node = next;
             }
         }
     }
 
-    void insert(const char* key, int value) {
+    void insert(const char* key, const T& value) {
         unsigned int h = hash(key);
-        HashNode* node = new HashNode(key, value);
+        Node* node = new Node(key, value);
         node->next = table[h];
         table[h] = node;
     }
 
-    int* find(const char* key) {
+    T* find(const char* key) {
         unsigned int h = hash(key);
-        HashNode* node = table[h];
+        Node* node = table[h];
         while (node) {
             if (strcmp(node->key, key) == 0) {
                 return &node->value;
@@ -68,10 +80,10 @@ public:
 
     bool erase(const char* key) {
         unsigned int h = hash(key);
-        HashNode** pp = &table[h];
+        Node** pp = &table[h];
         while (*pp) {
             if (strcmp((*pp)->key, key) == 0) {
-                HashNode* to_delete = *pp;
+                Node* to_delete = *pp;
                 *pp = to_delete->next;
                 delete to_delete;
                 return true;
@@ -80,13 +92,26 @@ public:
         }
         return false;
     }
+
+    void clear() {
+        for (int i = 0; i < HASH_SIZE; i++) {
+            Node* node = table[i];
+            while (node) {
+                Node* next = node->next;
+                delete node;
+                node = next;
+            }
+            table[i] = nullptr;
+        }
+    }
 };
 
-// User structure
+// ==================== Core Data Types ====================
+
 struct User {
     char username[25];
     char password[35];
-    char name[16];  // 2-5 Chinese characters, each up to 3 bytes
+    char name[16];
     char mailAddr[35];
     int privilege;
     bool loggedIn;
@@ -104,64 +129,222 @@ struct User {
     }
 };
 
-// Train structure
+struct StationTime {
+    int month, day, hour, minute;
+
+    StationTime() : month(0), day(0), hour(0), minute(0) {}
+    StationTime(int m, int d, int h, int min) : month(m), day(d), hour(h), minute(min) {}
+
+    bool operator<(const StationTime& other) const {
+        if (month != other.month) return month < other.month;
+        if (day != other.day) return day < other.day;
+        if (hour != other.hour) return hour < other.hour;
+        return minute < other.minute;
+    }
+
+    void addMinutes(int minutes) {
+        minute += minutes;
+        hour += minute / 60;
+        minute %= 60;
+        day += hour / 24;
+        hour %= 24;
+
+        // Simple handling for June-August
+        while (day > DAYS_IN_MONTH[month]) {
+            day -= DAYS_IN_MONTH[month];
+            month++;
+        }
+    }
+
+    string toString(bool showDate = true) const {
+        char buf[20];
+        if (showDate) {
+            sprintf(buf, "%02d-%02d %02d:%02d", month, day, hour, minute);
+        } else {
+            sprintf(buf, "%02d:%02d", hour, minute);
+        }
+        return string(buf);
+    }
+};
+
 struct Train {
     char trainID[25];
     int stationNum;
-    char stations[100][31];  // up to 10 Chinese chars * 3 bytes
+    char stations[MAX_STATIONS_PER_TRAIN][31];
     int seatNum;
-    int prices[99];  // stationNum-1
+    int prices[MAX_STATIONS_PER_TRAIN - 1];
     int startHour, startMinute;
-    int travelTimes[99];  // stationNum-1
-    int stopoverTimes[98]; // stationNum-2
+    int travelTimes[MAX_STATIONS_PER_TRAIN - 1];
+    int stopoverTimes[MAX_STATIONS_PER_TRAIN - 2];
     int saleDateStartMonth, saleDateStartDay;
     int saleDateEndMonth, saleDateEndDay;
     char type;
     bool released;
 
+    // Precomputed data for each station
+    StationTime arrivalTimes[MAX_STATIONS_PER_TRAIN];
+    StationTime departureTimes[MAX_STATIONS_PER_TRAIN];
+    int cumulativePrices[MAX_STATIONS_PER_TRAIN];
+
     Train() : stationNum(0), seatNum(0), released(false) {
+        trainID[0] = '\0';
+    }
+
+    void precompute() {
+        // Compute arrival and departure times for each station
+        // Starting from saleDateStart for the first station
+        arrivalTimes[0] = StationTime(saleDateStartMonth, saleDateStartDay, startHour, startMinute);
+        departureTimes[0] = arrivalTimes[0];
+        cumulativePrices[0] = 0;
+
+        for (int i = 1; i < stationNum; i++) {
+            // Arrive at station i
+            arrivalTimes[i] = departureTimes[i-1];
+            arrivalTimes[i].addMinutes(travelTimes[i-1]);
+
+            // Depart from station i (add stopover time except for last station)
+            departureTimes[i] = arrivalTimes[i];
+            if (i < stationNum - 1) {
+                departureTimes[i].addMinutes(stopoverTimes[i-1]);
+            }
+
+            // Cumulative price
+            cumulativePrices[i] = cumulativePrices[i-1] + prices[i-1];
+        }
+    }
+
+    // Check if train runs on a specific date (date when leaving from station s)
+    bool runsOnDate(int stationIdx, int month, int day) const {
+        // The train runs daily between sale dates
+        // We need to check if there exists a day d such that:
+        // departureTimes[stationIdx] on day d equals (month, day, start time)
+
+        // Simplified: check if (month, day) is within sale date range
+        // and the train would depart from this station on that day
+        if (month < saleDateStartMonth || month > saleDateEndMonth) return false;
+        if (month == saleDateStartMonth && day < saleDateStartDay) return false;
+        if (month == saleDateEndMonth && day > saleDateEndDay) return false;
+
+        // More precise check would consider travel time from first station
+        // For now, return true if within sale date range
+        return true;
+    }
+
+    // Get departure time from station s on specific date
+    StationTime getDepartureTime(int stationIdx, int month, int day) const {
+        // Calculate based on first station's departure
+        // Days offset = (month, day) - (saleDateStartMonth, saleDateStartDay)
+        // Then add travel time to station s
+
+        // Simplified: assume departure time is the same daily pattern
+        StationTime result(month, day, startHour, startMinute);
+        for (int i = 0; i < stationIdx; i++) {
+            result.addMinutes(travelTimes[i]);
+            if (i < stationIdx - 1) {
+                result.addMinutes(stopoverTimes[i]);
+            }
+        }
+        return result;
+    }
+
+    // Get arrival time at station t when departing from station s on date (month, day)
+    StationTime getArrivalTime(int fromIdx, int toIdx, int month, int day) const {
+        StationTime dep = getDepartureTime(fromIdx, month, day);
+        for (int i = fromIdx; i < toIdx; i++) {
+            dep.addMinutes(travelTimes[i]);
+            if (i < toIdx - 1) {
+                dep.addMinutes(stopoverTimes[i]);
+            }
+        }
+        return dep;
+    }
+
+    // Get price from station s to t
+    int getPrice(int fromIdx, int toIdx) const {
+        return cumulativePrices[toIdx] - cumulativePrices[fromIdx];
+    }
+};
+
+struct Order {
+    char username[25];
+    char trainID[25];
+    int fromIdx, toIdx;
+    int numTickets;
+    int price;
+    StationTime departureTime;
+    StationTime arrivalTime;
+    int status; // 0: success, 1: pending, 2: refunded
+    int timestamp; // For sorting by transaction time
+
+    Order() : fromIdx(0), toIdx(0), numTickets(0), price(0), status(0), timestamp(0) {
+        username[0] = '\0';
         trainID[0] = '\0';
     }
 };
 
-// Global data structures
-HashMap userMap;  // username -> index in users array
-User users[10000];
+// ==================== Global State ====================
+
+HashMap<int> userMap;  // username -> index
+User users[MAX_USERS];
 int userCount = 0;
 
-HashMap trainMap;  // trainID -> index in trains array
-Train trains[1000];
+HashMap<int> trainMap;  // trainID -> index
+Train trains[MAX_TRAINS];
 int trainCount = 0;
 
-HashMap loggedInUsers;  // username -> 1 (simple set)
+HashMap<bool> loggedInUsers;  // username -> true if logged in
 
-// Helper function to parse time
+Order orders[MAX_ORDERS];
+int orderCount = 0;
+int currentTimestamp = 0;
+
+// Simple station index entry
+struct StationIndexEntry {
+    int trainIdx;
+    int stationIdx;
+    StationIndexEntry* next;
+
+    StationIndexEntry(int t, int s) : trainIdx(t), stationIdx(s), next(nullptr) {}
+};
+
+// Station index: stationName -> linked list of StationIndexEntry
+HashMap<StationIndexEntry*> stationIndex;
+
+// ==================== Helper Functions ====================
+
 void parseTime(const char* timeStr, int& hour, int& minute) {
     sscanf(timeStr, "%d:%d", &hour, &minute);
 }
 
-// Helper function to parse date
 void parseDate(const char* dateStr, int& month, int& day) {
     sscanf(dateStr, "%d-%d", &month, &day);
 }
 
-// Helper function to check if a date is within range
-bool isDateInRange(int month, int day, int startMonth, int startDay, int endMonth, int endDay) {
-    if (month < startMonth || month > endMonth) return false;
-    if (month == startMonth && day < startDay) return false;
-    if (month == endMonth && day > endDay) return false;
-    return true;
+int dateToDays(int month, int day) {
+    // Convert date to days since June 1
+    int days = 0;
+    for (int m = 6; m < month; m++) {
+        days += DAYS_IN_MONTH[m];
+    }
+    days += (day - 1);
+    return days;
 }
 
-// Command implementations
+bool isDateInRange(int month, int day, int startMonth, int startDay, int endMonth, int endDay) {
+    int queryDays = dateToDays(month, day);
+    int startDays = dateToDays(startMonth, startDay);
+    int endDays = dateToDays(endMonth, endDay);
+    return queryDays >= startDays && queryDays <= endDays;
+}
+
+// ==================== Command Implementations ====================
+
 int add_user(const char* curUser, const char* username, const char* password,
              const char* name, const char* mailAddr, int privilege) {
-    // Check if username already exists
     if (userMap.find(username) != nullptr) {
         return -1;
     }
 
-    // First user special case
     if (userCount == 0) {
         users[userCount] = User(username, password, name, mailAddr, 10);
         userMap.insert(username, userCount);
@@ -169,7 +352,6 @@ int add_user(const char* curUser, const char* username, const char* password,
         return 0;
     }
 
-    // Check permission
     int* curIdx = userMap.find(curUser);
     if (curIdx == nullptr || !users[*curIdx].loggedIn) {
         return -1;
@@ -197,11 +379,11 @@ int login(const char* username, const char* password) {
     }
 
     if (user.loggedIn) {
-        return -1;  // Already logged in
+        return -1;
     }
 
     user.loggedIn = true;
-    loggedInUsers.insert(username, 1);
+    loggedInUsers.insert(username, true);
     return 0;
 }
 
@@ -283,7 +465,6 @@ int modify_profile(const char* curUser, const char* username, const char* passwo
 int add_train(const char* trainID, int stationNum, int seatNum, const char* stationsStr,
               const char* pricesStr, const char* startTime, const char* travelTimesStr,
               const char* stopoverTimesStr, const char* saleDateStr, char type) {
-    // Check if trainID already exists
     if (trainMap.find(trainID) != nullptr) {
         return -1;
     }
@@ -302,6 +483,19 @@ int add_train(const char* trainID, int stationNum, int seatNum, const char* stat
     int idx = 0;
     while (token && idx < stationNum) {
         strcpy(train.stations[idx], token);
+
+        // Add to station index
+        StationIndexEntry** stationList = stationIndex.find(token);
+        if (stationList == nullptr) {
+            StationIndexEntry* newEntry = new StationIndexEntry(trainCount, idx);
+            stationIndex.insert(token, newEntry);
+        } else {
+            // Add to front of linked list
+            StationIndexEntry* newEntry = new StationIndexEntry(trainCount, idx);
+            newEntry->next = *stationList;
+            *stationList = newEntry;
+        }
+
         token = strtok(nullptr, "|");
         idx++;
     }
@@ -329,13 +523,17 @@ int add_train(const char* trainID, int stationNum, int seatNum, const char* stat
         idx++;
     }
 
-    // Parse stopover times (may be "_" for trains with 2 stations)
+    // Parse stopover times
     if (stationNum > 2) {
         strcpy(buffer, stopoverTimesStr);
         token = strtok(buffer, "|");
         idx = 0;
         while (token && idx < stationNum - 2) {
-            train.stopoverTimes[idx] = atoi(token);
+            if (strcmp(token, "_") != 0) {
+                train.stopoverTimes[idx] = atoi(token);
+            } else {
+                train.stopoverTimes[idx] = 0;
+            }
             token = strtok(nullptr, "|");
             idx++;
         }
@@ -347,6 +545,9 @@ int add_train(const char* trainID, int stationNum, int seatNum, const char* stat
     parseDate(token, train.saleDateStartMonth, train.saleDateStartDay);
     token = strtok(nullptr, "|");
     parseDate(token, train.saleDateEndMonth, train.saleDateEndDay);
+
+    // Precompute arrival/departure times
+    train.precompute();
 
     trainMap.insert(trainID, trainCount);
     trainCount++;
@@ -370,31 +571,32 @@ int delete_train(const char* trainID) {
     }
 
     if (trains[*idx].released) {
-        return -1;  // Can't delete released train
+        return -1;
     }
 
-    // Mark as deleted (we don't actually remove from array to avoid reindexing)
-    trains[*idx].trainID[0] = '\0';
+    // Remove from station index
+    Train& train = trains[*idx];
+    for (int i = 0; i < train.stationNum; i++) {
+        StationIndexEntry** stationList = stationIndex.find(train.stations[i]);
+        if (stationList) {
+            // Remove this train from the linked list
+            StationIndexEntry** pp = stationList;
+            while (*pp) {
+                if ((*pp)->trainIdx == *idx) {
+                    StationIndexEntry* toDelete = *pp;
+                    *pp = toDelete->next;
+                    delete toDelete;
+                    break;
+                }
+                pp = &(*pp)->next;
+            }
+        }
+    }
+
+    // Mark as deleted
+    train.trainID[0] = '\0';
     trainMap.erase(trainID);
     return 0;
-}
-
-// Helper function to add minutes to a date/time
-void addMinutes(int& month, int& day, int& hour, int& minute, int minutes) {
-    minute += minutes;
-    hour += minute / 60;
-    minute %= 60;
-
-    int days = hour / 24;
-    hour %= 24;
-
-    day += days;
-    // Simple month/day handling for June-August 2021
-    // In reality, we should handle month boundaries properly
-    if (day > 30) {  // Simplified
-        day -= 30;
-        month++;
-    }
 }
 
 int query_train(const char* trainID, const char* dateStr) {
@@ -407,7 +609,6 @@ int query_train(const char* trainID, const char* dateStr) {
     int queryMonth, queryDay;
     parseDate(dateStr, queryMonth, queryDay);
 
-    // Check if query date is within sale date range
     if (!isDateInRange(queryMonth, queryDay,
                        train.saleDateStartMonth, train.saleDateStartDay,
                        train.saleDateEndMonth, train.saleDateEndDay)) {
@@ -416,56 +617,137 @@ int query_train(const char* trainID, const char* dateStr) {
 
     printf("%s %c\n", train.trainID, train.type);
 
-    // Calculate arrival and departure times for each station
-    int currentMonth = queryMonth;
-    int currentDay = queryDay;
-    int currentHour = train.startHour;
-    int currentMinute = train.startMinute;
-
-    int cumulativePrice = 0;
+    // Calculate times for this specific date
+    // Days offset from sale start date
+    int daysOffset = dateToDays(queryMonth, queryDay) -
+                     dateToDays(train.saleDateStartMonth, train.saleDateStartDay);
 
     for (int i = 0; i < train.stationNum; i++) {
-        // Arrival time (for first station: xx-xx xx:xx)
-        char arriveTime[20], leaveTime[20];
+        // Calculate arrival and departure times for this date
+        StationTime arrival = train.arrivalTimes[i];
+        StationTime departure = train.departureTimes[i];
 
+        // Add days offset
+        arrival.day += daysOffset;
+        departure.day += daysOffset;
+
+        // Handle month boundaries
+        while (arrival.day > DAYS_IN_MONTH[arrival.month]) {
+            arrival.day -= DAYS_IN_MONTH[arrival.month];
+            arrival.month++;
+        }
+        while (departure.day > DAYS_IN_MONTH[departure.month]) {
+            departure.day -= DAYS_IN_MONTH[departure.month];
+            departure.month++;
+        }
+
+        char arriveTime[20], leaveTime[20];
         if (i == 0) {
             strcpy(arriveTime, "xx-xx xx:xx");
         } else {
             sprintf(arriveTime, "%02d-%02d %02d:%02d",
-                   currentMonth, currentDay, currentHour, currentMinute);
+                   arrival.month, arrival.day, arrival.hour, arrival.minute);
         }
 
-        // Add stopover time (except for first and last station)
-        if (i > 0 && i < train.stationNum - 1) {
-            addMinutes(currentMonth, currentDay, currentHour, currentMinute,
-                      train.stopoverTimes[i-1]);
-        }
-
-        // Departure time (for last station: xx-xx xx:xx)
         if (i == train.stationNum - 1) {
             strcpy(leaveTime, "xx-xx xx:xx");
         } else {
             sprintf(leaveTime, "%02d-%02d %02d:%02d",
-                   currentMonth, currentDay, currentHour, currentMinute);
+                   departure.month, departure.day, departure.hour, departure.minute);
         }
 
-        // Seat information
         char seatInfo[10];
         if (i == train.stationNum - 1) {
             strcpy(seatInfo, "x");
         } else {
-            sprintf(seatInfo, "%d", train.seatNum);  // Simplified: no tickets sold yet
+            sprintf(seatInfo, "%d", train.seatNum); // Simplified: no ticket sales yet
         }
 
         printf("%s %s -> %s %d %s\n", train.stations[i], arriveTime, leaveTime,
-               cumulativePrice, seatInfo);
+               train.cumulativePrices[i], seatInfo);
+    }
 
-        // Add travel time to next station (except for last station)
-        if (i < train.stationNum - 1) {
-            addMinutes(currentMonth, currentDay, currentHour, currentMinute,
-                      train.travelTimes[i]);
-            cumulativePrice += train.prices[i];
+    return 0;
+}
+
+int query_ticket(const char* fromStation, const char* toStation,
+                 const char* dateStr, const char* sortBy) {
+    int queryMonth, queryDay;
+    parseDate(dateStr, queryMonth, queryDay);
+
+    // Find all trains that pass through fromStation
+    StationIndexEntry** fromList = stationIndex.find(fromStation);
+    if (fromList == nullptr) {
+        printf("0\n");
+        return 0;
+    }
+
+    // For each train, check if it also passes through toStation after fromStation
+    // Simple array for results
+    const int MAX_RESULTS = 1000;
+    int resultTrainIdx[MAX_RESULTS];
+    int resultFromIdx[MAX_RESULTS];
+    int resultToIdx[MAX_RESULTS];
+    int resultCount = 0;
+
+    StationIndexEntry* entry = *fromList;
+    while (entry && resultCount < MAX_RESULTS) {
+        int trainIdx = entry->trainIdx;
+        int fromIdx = entry->stationIdx;
+
+        if (trains[trainIdx].trainID[0] == '\0') { // Deleted train
+            entry = entry->next;
+            continue;
         }
+        if (!trains[trainIdx].released) { // Train not released
+            entry = entry->next;
+            continue;
+        }
+
+        // Check if train passes through toStation after fromIdx
+        Train& train = trains[trainIdx];
+        for (int toIdx = fromIdx + 1; toIdx < train.stationNum; toIdx++) {
+            if (strcmp(train.stations[toIdx], toStation) == 0) {
+                // Check if train runs on query date
+                if (train.runsOnDate(fromIdx, queryMonth, queryDay)) {
+                    resultTrainIdx[resultCount] = trainIdx;
+                    resultFromIdx[resultCount] = fromIdx;
+                    resultToIdx[resultCount] = toIdx;
+                    resultCount++;
+                }
+                break;
+            }
+        }
+
+        entry = entry->next;
+    }
+
+    if (resultCount == 0) {
+        printf("0\n");
+        return 0;
+    }
+
+    // Simple output without sorting for now
+    printf("%d\n", resultCount);
+    for (int i = 0; i < resultCount; i++) {
+        int trainIdx = resultTrainIdx[i];
+        int fromIdx = resultFromIdx[i];
+        int toIdx = resultToIdx[i];
+
+        Train& train = trains[trainIdx];
+
+        StationTime depTime = train.getDepartureTime(fromIdx, queryMonth, queryDay);
+        StationTime arrTime = train.getArrivalTime(fromIdx, toIdx, queryMonth, queryDay);
+        int price = train.getPrice(fromIdx, toIdx);
+
+        printf("%s %s %s -> %s %s %d %d\n",
+               train.trainID,
+               train.stations[fromIdx],
+               depTime.toString().c_str(),
+               train.stations[toIdx],
+               arrTime.toString().c_str(),
+               price,
+               train.seatNum); // Simplified: full availability
     }
 
     return 0;
@@ -475,16 +757,14 @@ int clean() {
     // Clear all data
     userCount = 0;
     trainCount = 0;
+    orderCount = 0;
+    currentTimestamp = 0;
 
-    // Reinitialize hash maps
-    userMap.~HashMap();
-    new (&userMap) HashMap();
-
-    trainMap.~HashMap();
-    new (&trainMap) HashMap();
-
-    loggedInUsers.~HashMap();
-    new (&loggedInUsers) HashMap();
+    // Clear hash maps
+    userMap.clear();
+    trainMap.clear();
+    loggedInUsers.clear();
+    stationIndex.clear();
 
     return 0;
 }
@@ -494,26 +774,128 @@ int exit_program() {
     return 0;
 }
 
-// Main command parser
+// ==================== Command Parser ====================
+
+CommandParser parser;
+
 void processCommand(const string& line) {
     if (line.empty()) return;
 
-    // Simple command parsing (this needs to be much more robust)
-    if (line.find("add_user") == 0) {
-        // Parse parameters...
-        // For now, just return 0 for testing
-        printf("0\n");
-    } else if (line.find("clean") == 0) {
-        clean();
-        printf("0\n");
-    } else if (line.find("exit") == 0) {
+    parser.parse(line);
+
+    if (parser.command == "add_user") {
+        const char* curUser = parser.get("c").c_str();
+        const char* username = parser.get("u").c_str();
+        const char* password = parser.get("p").c_str();
+        const char* name = parser.get("n").c_str();
+        const char* mailAddr = parser.get("m").c_str();
+        int privilege = parser.getInt("g");
+
+        int result = add_user(curUser, username, password, name, mailAddr, privilege);
+        printf("%d\n", result);
+
+    } else if (parser.command == "login") {
+        const char* username = parser.get("u").c_str();
+        const char* password = parser.get("p").c_str();
+
+        int result = login(username, password);
+        printf("%d\n", result);
+
+    } else if (parser.command == "logout") {
+        const char* username = parser.get("u").c_str();
+
+        int result = logout(username);
+        printf("%d\n", result);
+
+    } else if (parser.command == "query_profile") {
+        const char* curUser = parser.get("c").c_str();
+        const char* username = parser.get("u").c_str();
+
+        int result = query_profile(curUser, username);
+        if (result == -1) {
+            printf("-1\n");
+        }
+        // query_profile prints its own output on success
+
+    } else if (parser.command == "modify_profile") {
+        const char* curUser = parser.get("c").c_str();
+        const char* username = parser.get("u").c_str();
+        const char* password = parser.has("p") ? parser.get("p").c_str() : nullptr;
+        const char* name = parser.has("n") ? parser.get("n").c_str() : nullptr;
+        const char* mailAddr = parser.has("m") ? parser.get("m").c_str() : nullptr;
+        int privilege = parser.has("g") ? parser.getInt("g") : -1;
+
+        int result = modify_profile(curUser, username, password, name, mailAddr, privilege);
+        if (result == -1) {
+            printf("-1\n");
+        }
+        // modify_profile prints its own output on success
+
+    } else if (parser.command == "add_train") {
+        const char* trainID = parser.get("i").c_str();
+        int stationNum = parser.getInt("n");
+        int seatNum = parser.getInt("m");
+        const char* stations = parser.get("s").c_str();
+        const char* prices = parser.get("p").c_str();
+        const char* startTime = parser.get("x").c_str();
+        const char* travelTimes = parser.get("t").c_str();
+        const char* stopoverTimes = parser.get("o").c_str();
+        const char* saleDate = parser.get("d").c_str();
+        char type = parser.get("y")[0];
+
+        int result = add_train(trainID, stationNum, seatNum, stations, prices,
+                              startTime, travelTimes, stopoverTimes, saleDate, type);
+        printf("%d\n", result);
+
+    } else if (parser.command == "release_train") {
+        const char* trainID = parser.get("i").c_str();
+
+        int result = release_train(trainID);
+        printf("%d\n", result);
+
+    } else if (parser.command == "delete_train") {
+        const char* trainID = parser.get("i").c_str();
+
+        int result = delete_train(trainID);
+        printf("%d\n", result);
+
+    } else if (parser.command == "query_train") {
+        const char* trainID = parser.get("i").c_str();
+        const char* date = parser.get("d").c_str();
+
+        int result = query_train(trainID, date);
+        if (result == -1) {
+            printf("-1\n");
+        }
+        // query_train prints its own output on success
+
+    } else if (parser.command == "query_ticket") {
+        const char* fromStation = parser.get("s").c_str();
+        const char* toStation = parser.get("t").c_str();
+        const char* date = parser.get("d").c_str();
+        const char* sortBy = parser.get("p", "time").c_str();
+
+        int result = query_ticket(fromStation, toStation, date, sortBy);
+        if (result == -1) {
+            printf("-1\n");
+        }
+        // query_ticket prints its own output
+
+    } else if (parser.command == "clean") {
+        int result = clean();
+        printf("%d\n", result);
+
+    } else if (parser.command == "exit") {
         exit_program();
         exit(0);
+
     } else {
         // Unknown command
         printf("-1\n");
     }
 }
+
+// ==================== Main Function ====================
 
 int main() {
     ios::sync_with_stdio(false);
